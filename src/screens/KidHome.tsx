@@ -212,6 +212,13 @@ function WishesTab() {
     loadWishes();
   }, []);
 
+  // 每秒刷新一次，确保冷静期倒计时实时更新
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   const handlePickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
@@ -279,8 +286,10 @@ function WishesTab() {
     cancelled: { emoji: "👋", message: "你真棒！学会取舍了！" },
   };
 
-  const formatDate = (ts: number) => {
+  const formatDate = (ts: number | undefined | null) => {
+    if (!ts || isNaN(ts)) return "未知日期";
     const d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return "未知日期";
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   };
 
@@ -310,8 +319,12 @@ function WishesTab() {
   };
 
   const getCompletedDate = (wish: (typeof wishes)[0]) => {
-    if (wish.status === "purchased" && wish.purchasedMonth) {
-      return `完成于 ${wish.purchasedMonth}`;
+    if (wish.status === "purchased") {
+      if (wish.purchasedMonth) {
+        return `完成于 ${wish.purchasedMonth}`;
+      }
+      // fallback: 用 coolingEndAt（进入 wanted 的时间近似）
+      return `完成于 ${formatDate(wish.coolingEndAt)}`;
     }
     if (wish.status === "expired") {
       return `完成于 ${formatDate(wish.coolingEndAt)}`;
@@ -319,30 +332,28 @@ function WishesTab() {
     if (wish.status === "cancelled") {
       return "已取消";
     }
-    return null;
+    return `完成于 ${formatDate(wish.createdAt)}`;
   };
 
   return (
     <View style={{ flex: 1 }}>
       <WishSidebar visible={sidebarVisible} onClose={() => setSidebarVisible(false)} selected={filter} onSelect={setFilter} />
 
-      <ScrollView style={styles.tabContainer} stickyHeaderIndices={[0]}>
-        {/* Sticky Header */}
-        <View style={styles.stickyHeader}>
-          <View style={{ width: 72, alignItems: "flex-start" }}>
-            <TouchableOpacity onPress={() => setSidebarVisible(true)} style={{ padding: 4 }}>
-              <MaterialCommunityIcons name="menu" size={24} color="#1f2937" />
-            </TouchableOpacity>
-          </View>
-          <Text variant="titleLarge" style={{ fontWeight: "bold", color: "#1f2937", textAlign: "center", flex: 1 }}>
-            我的愿望清单
-          </Text>
-          <View style={{ width: 72, alignItems: "flex-end" }}>
-            <Button mode="contained" compact icon="plus" onPress={() => setDialogVisible(true)} labelStyle={{ fontSize: 12, marginHorizontal: 2 }}>
-              添加
-            </Button>
-          </View>
-        </View>
+      {/* 固定标题栏（绝对定位，确保卡片永远滑不到它上面） */}
+      <View style={styles.fixedHeader}>
+        <TouchableOpacity onPress={() => setSidebarVisible(true)} style={styles.headerBtn}>
+          <MaterialCommunityIcons name="menu" size={24} color="#1f2937" />
+        </TouchableOpacity>
+        <Text variant="titleLarge" style={styles.headerTitle}>我的愿望清单</Text>
+        <TouchableOpacity onPress={() => setDialogVisible(true)} style={styles.headerBtn}>
+          <MaterialCommunityIcons name="plus-circle" size={28} color={theme.colors.primary} />
+        </TouchableOpacity>
+      </View>
+
+      {/* ScrollView 内容区域，顶部留出标题栏高度 */}
+      <ScrollView style={{ flex: 1, backgroundColor: "#fffbeb" }} contentContainerStyle={{ padding: 16, paddingTop: 64 }}>
+        {/* tick 参与渲染，确保倒计时每秒刷新 */}
+        <Text style={{ display: "none" }}>{tick}</Text>
 
         {/* Wishes List */}
         {displayedWishes.map((wish) => {
@@ -366,11 +377,9 @@ function WishesTab() {
                     <Text variant="titleLarge" style={{ color: theme.colors.primary, fontWeight: "bold", marginTop: 4 }}>
                       ¥{wish.price}
                     </Text>
-                    {completedDate && (
-                      <Text variant="bodySmall" style={{ color: "#9ca3af", marginTop: 2 }}>
-                        {completedDate}
-                      </Text>
-                    )}
+                    <Text variant="bodySmall" style={{ color: "#9ca3af", marginTop: 2 }}>
+                      {completedDate}
+                    </Text>
                     {wish.status === "insufficient" && (
                       <Text style={{ color: "#ef4444", marginTop: 4 }}>
                         😢 预算不足，下月再来看看吧~
@@ -444,16 +453,9 @@ function WishesTab() {
                     <View style={{ flex: 1 }}>
                       <Text variant="titleMedium">{wish.name}</Text>
                       <Text variant="bodySmall" style={{ color: "#6b7280" }}>¥{wish.price}</Text>
-                      {completedDate && (
-                        <Text variant="bodySmall" style={{ color: "#9ca3af", marginTop: 2 }}>
-                          {completedDate}
-                        </Text>
-                      )}
-                      {!completedDate && (
-                        <Text variant="bodySmall" style={{ color: "#9ca3af", marginTop: 2 }}>
-                          {mood.message}
-                        </Text>
-                      )}
+                      <Text variant="bodySmall" style={{ color: "#9ca3af", marginTop: 2 }}>
+                        {completedDate}
+                      </Text>
                     </View>
                     {wish.imagePath && (
                       <Image source={{ uri: wish.imagePath }} style={styles.wishThumb} />
@@ -860,7 +862,7 @@ function MyTab() {
         </Card.Content>
       </Card>
 
-      {__DEV__ && <DevPanel />}
+      {true && <DevPanel />}
 
       {/* Edit Name Dialog */}
       <Portal>
@@ -933,19 +935,26 @@ export default function KidHome() {
 
 const styles = StyleSheet.create({
   tabContainer: { flex: 1, padding: 16, backgroundColor: "#fffbeb" },
-  stickyHeader: {
+  fixedHeader: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
     flexDirection: "row",
     alignItems: "center",
-    paddingVertical: 8,
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     backgroundColor: "#fffbeb",
-    elevation: 4,
+    elevation: 5,
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.12,
     shadowRadius: 4,
-    zIndex: 10,
+    zIndex: 20,
   },
-  tabTitle: { fontWeight: "bold", color: "#1f2937" },
+  headerBtn: { padding: 4, width: 40, alignItems: "center" },
+  headerTitle: { fontWeight: "bold", color: "#1f2937", textAlign: "center", flex: 1 },
   wishCard: { marginBottom: 12, borderRadius: 12 },
   wishThumb: { width: 72, height: 72, borderRadius: 10 },
   wishHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },

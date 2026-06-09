@@ -132,7 +132,8 @@ export const WishService = {
         db.runSync("UPDATE wishes SET status = 'wanted' WHERE id = ?", [wish.id]);
 
         // 检查预算
-        const currentMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`;
+        const _now = new Date(now());
+        const currentMonth = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}`;
         const budget = db.getFirstSync<{ remaining: number }>(
           "SELECT remaining FROM monthly_budgets WHERE month = ?",
           [currentMonth]
