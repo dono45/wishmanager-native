@@ -37,8 +37,10 @@ interface AppState {
 
   // Mutations
   createWish: (input: { name: string; price: number; imagePath?: string }) => void;
-  confirmWish: (id: number) => { remainingDays: number; alreadyConfirmed: boolean };
+  confirmWish: (id: number) => { remainingDays: number; alreadyConfirmed: boolean; totalConfirmations: number };
   cancelWish: (id: number) => void;
+  restoreWishToCooling: (id: number) => { restored: boolean; message: string };
+  purchaseSingleWish: (id: number) => { status: string; message: string };
   processCooling: () => void;
   completeTask: (id: number) => void;
   createCrisisRecord: (input: Parameters<typeof CrisisService.createRecord>[0]) => void;
@@ -112,12 +114,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   confirmWish: (id) => {
     const result = WishService.confirmWish(id);
     get().loadWishes();
-    return { remainingDays: result.remainingDays, alreadyConfirmed: result.alreadyConfirmed };
+    return { remainingDays: result.remainingDays, alreadyConfirmed: result.alreadyConfirmed, totalConfirmations: result.totalConfirmations };
   },
 
   cancelWish: (id) => {
     WishService.cancelWish(id);
     get().loadWishes();
+  },
+
+  restoreWishToCooling: (id) => {
+    const result = WishService.restoreWishToCooling(id);
+    get().loadWishes();
+    return result;
+  },
+
+  purchaseSingleWish: (id) => {
+    const result = WishService.purchaseSingleWish(id);
+    get().loadWishes();
+    get().loadBudget();
+    return result;
   },
 
   processCooling: () => {

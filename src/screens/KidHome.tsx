@@ -2,7 +2,7 @@
  * 儿童模式首页 - 4个Tab：愿望、储蓄罐、任务、我的
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   View,
   StyleSheet,
@@ -26,6 +26,7 @@ import {
   Chip,
 } from "react-native-paper";
 import { createBottomTabNavigator } from "@react-navigation/bottom-tabs";
+import { useFocusEffect } from "@react-navigation/native";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useAppStore } from "@/stores/appStore";
 import { useAuthStore } from "@/stores/authStore";
@@ -193,6 +194,8 @@ function WishesTab() {
   const createWish = useAppStore((s) => s.createWish);
   const confirmWish = useAppStore((s) => s.confirmWish);
   const cancelWish = useAppStore((s) => s.cancelWish);
+  const restoreWishToCooling = useAppStore((s) => s.restoreWishToCooling);
+  const purchaseSingleWish = useAppStore((s) => s.purchaseSingleWish);
   const processCooling = useAppStore((s) => s.processCooling);
 
   const [sidebarVisible, setSidebarVisible] = useState(false);
@@ -212,12 +215,18 @@ function WishesTab() {
     loadWishes();
   }, []);
 
-  // 每秒刷新一次，确保冷静期倒计时实时更新
+  // 1小时轮询 + 切换回本Tab立即刷新
   const [tick, setTick] = useState(0);
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    const id = setInterval(() => setTick((t) => t + 1), 60 * 60 * 1000);
     return () => clearInterval(id);
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      setTick((t) => t + 1);
+    }, [])
+  );
 
   const handlePickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -242,12 +251,49 @@ function WishesTab() {
 
   const handleConfirm = (wish: (typeof wishes)[0]) => {
     try {
+      // 预算不足状态：点击"我还想要"触发预算检查
+      if (wish.status === "insufficient") {
+        const result = restoreWishToCooling(wish.id);
+        if (result.restored) {
+          Alert.alert("✨ 预算够了！", result.message);
+        } else {
+          Alert.alert("💡 再等等吧", result.message);
+        }
+        return;
+      }
+
+      // 冷静期已结束（如 advanceTime 后），直接触发购买判断，不再走每日确认
+      if (wish.status === "cooling" && wish.coolingEndAt * 1000 <= now()) {
+        const result = purchaseSingleWish(wish.id);
+        if (result.status === "purchased") {
+          Alert.alert("🎉 购买成功！", result.message);
+        } else if (result.status === "insufficient") {
+          Alert.alert("😢 预算不足", result.message);
+        }
+        return;
+      }
+
+      // cooling 状态：每日确认
       const result = confirmWish(wish.id);
       if (result.alreadyConfirmed) {
         Alert.alert("提示", "今天已经确认过了哦！");
-      } else {
-        setEncourage({ visible: true, type: "confirm", remainingDays: result.remainingDays });
+        return;
       }
+
+      // 第7天确认且冷静期已结束，立即触发购买判断
+      const isLastDay = result.totalConfirmations >= 7;
+      const isCoolingEnded = wish.coolingEndAt * 1000 <= now();
+      if (isLastDay && isCoolingEnded) {
+        const purchaseResult = purchaseSingleWish(wish.id);
+        if (purchaseResult.status === "purchased") {
+          Alert.alert("🎉 购买成功！", purchaseResult.message);
+        } else if (purchaseResult.status === "insufficient") {
+          Alert.alert("😢 预算不足", purchaseResult.message);
+        }
+        return;
+      }
+
+      setEncourage({ visible: true, type: "confirm", remainingDays: result.remainingDays });
     } catch (e: any) {
       Alert.alert("错误", e.message);
     }
@@ -320,19 +366,15 @@ function WishesTab() {
 
   const getCompletedDate = (wish: (typeof wishes)[0]) => {
     if (wish.status === "purchased") {
-      if (wish.purchasedMonth) {
-        return `完成于 ${wish.purchasedMonth}`;
-      }
-      // fallback: 用 coolingEndAt（进入 wanted 的时间近似）
       return `完成于 ${formatDate(wish.coolingEndAt)}`;
     }
     if (wish.status === "expired") {
-      return `完成于 ${formatDate(wish.coolingEndAt)}`;
+      return `过期于 ${formatDate(wish.coolingEndAt)}`;
     }
     if (wish.status === "cancelled") {
-      return "已取消";
+      return `取消于 ${formatDate(wish.coolingEndAt)}`;
     }
-    return `完成于 ${formatDate(wish.createdAt)}`;
+    return "";
   };
 
   return (
@@ -352,9 +394,6 @@ function WishesTab() {
 
       {/* ScrollView 内容区域，顶部留出标题栏高度 */}
       <ScrollView style={{ flex: 1, backgroundColor: "#fffbeb" }} contentContainerStyle={{ padding: 16, paddingTop: 64 }}>
-        {/* tick 参与渲染，确保倒计时每秒刷新 */}
-        <Text style={{ display: "none" }}>{tick}</Text>
-
         {/* Wishes List */}
         {displayedWishes.map((wish) => {
           const confirmations: string[] = JSON.parse(wish.dailyConfirmations || "[]");
@@ -377,12 +416,14 @@ function WishesTab() {
                     <Text variant="titleLarge" style={{ color: theme.colors.primary, fontWeight: "bold", marginTop: 4 }}>
                       ¥{wish.price}
                     </Text>
-                    <Text variant="bodySmall" style={{ color: "#9ca3af", marginTop: 2 }}>
-                      {completedDate}
-                    </Text>
+                    {isCompleted && (
+                      <Text variant="bodySmall" style={{ color: "#9ca3af", marginTop: 2 }}>
+                        {completedDate}
+                      </Text>
+                    )}
                     {wish.status === "insufficient" && (
-                      <Text style={{ color: "#ef4444", marginTop: 4 }}>
-                        😢 预算不足，下月再来看看吧~
+                      <Text style={{ color: "#f59e0b", marginTop: 4 }}>
+                        💡 当月预算不够哦，先存一存，下个月再看看吧~
                       </Text>
                     )}
                   </View>
@@ -391,17 +432,26 @@ function WishesTab() {
                   )}
                 </View>
 
-                {/* 操作区：cooling 状态按钮（整行，不受右侧图片影响） */}
-                {wish.status === "cooling" && (
+                {/* 操作区：cooling / insufficient 状态按钮 */}
+                {(wish.status === "cooling" || wish.status === "insufficient") && (
                   <View style={{ marginTop: 12 }}>
-                    <ProgressBar
-                      progress={confirmations.length / 7}
-                      color={theme.colors.primary}
-                      style={{ height: 8, borderRadius: 4 }}
-                    />
-                    <Text variant="bodySmall" style={{ marginTop: 4, color: "#6b7280" }}>
-                      已确认 {confirmations.length}/7 天
-                    </Text>
+                    {wish.status === "cooling" && (
+                      <>
+                        <ProgressBar
+                          progress={confirmations.length / 7}
+                          color={theme.colors.primary}
+                          style={{ height: 8, borderRadius: 4 }}
+                        />
+                        <Text variant="bodySmall" style={{ marginTop: 4, color: "#6b7280" }}>
+                          已确认 {confirmations.length}/7 天
+                        </Text>
+                      </>
+                    )}
+                    {wish.status === "insufficient" && (
+                      <Text variant="bodySmall" style={{ marginTop: 4, color: "#9ca3af" }}>
+                        预算够了就可以开始7天冷静期啦
+                      </Text>
+                    )}
                     <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
                       <Button
                         mode="contained"

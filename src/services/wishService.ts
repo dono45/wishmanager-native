@@ -38,27 +38,64 @@ export const WishService = {
     );
   },
 
-  // 创建愿望（进入冷静期）
+  // 创建愿望（进入冷静期，若预算不足直接设为 insufficient）
   createWish(input: CreateWishInput): Wish {
     const db = getDatabase();
     const coolingEndAt = getCoolingEndTime();
 
+    // 检查当月预算
+    const currentMonth = `${new Date(now()).getFullYear()}-${String(new Date(now()).getMonth() + 1).padStart(2, "0")}`;
+    const budget = db.getFirstSync<{ remaining: number }>(
+      "SELECT remaining FROM monthly_budgets WHERE month = ?",
+      [currentMonth]
+    );
+    const status = budget && budget.remaining >= input.price ? "cooling" : "insufficient";
+
     const result = db.runSync(
       `INSERT INTO wishes (name, image_path, price, cooling_end_at, status, daily_confirmations)
-       VALUES (?, ?, ?, ?, 'cooling', '[]')`,
-      [input.name, input.imagePath ?? null, input.price, coolingEndAt]
+       VALUES (?, ?, ?, ?, ?, '[]')`,
+      [input.name, input.imagePath ?? null, input.price, coolingEndAt, status]
     );
 
     const id = result.lastInsertRowId;
     const wish = db.getFirstSync<Wish>("SELECT id, name, image_path as imagePath, price, created_at as createdAt, cooling_end_at as coolingEndAt, status, purchased_month as purchasedMonth, daily_confirmations as dailyConfirmations, child_notes as childNotes FROM wishes WHERE id = ?", [id]);
     if (!wish) throw new Error("创建愿望失败");
 
-    logger.info("Wish created", { id, name: input.name, price: input.price });
+    logger.info("Wish created", { id, name: input.name, price: input.price, status });
     return wish;
   },
 
+  // 预算不足时恢复为冷静期（预算够了再试）
+  restoreWishToCooling(id: number): { restored: boolean; message: string } {
+    const db = getDatabase();
+    const wish = db.getFirstSync<Wish>("SELECT id, name, image_path as imagePath, price, created_at as createdAt, cooling_end_at as coolingEndAt, status, purchased_month as purchasedMonth, daily_confirmations as dailyConfirmations, child_notes as childNotes FROM wishes WHERE id = ?", [id]);
+    if (!wish || wish.status !== "insufficient") {
+      throw new Error("愿望不在预算不足状态");
+    }
+
+    const currentMonth = `${new Date(now()).getFullYear()}-${String(new Date(now()).getMonth() + 1).padStart(2, "0")}`;
+    const budget = db.getFirstSync<{ remaining: number }>(
+      "SELECT remaining FROM monthly_budgets WHERE month = ?",
+      [currentMonth]
+    );
+
+    if (!budget || budget.remaining < wish.price) {
+      return { restored: false, message: "预算还是不够哦，再等一等吧~ 下个月可能会有惊喜！" };
+    }
+
+    // 恢复为 cooling，重新计算7天冷静期
+    const newCoolingEndAt = getCoolingEndTime();
+    db.runSync(
+      "UPDATE wishes SET status = 'cooling', cooling_end_at = ?, daily_confirmations = '[]' WHERE id = ?",
+      [newCoolingEndAt, id]
+    );
+
+    logger.info("Wish restored to cooling", { id, name: wish.name });
+    return { restored: true, message: `太棒了！预算够了，${wish.name} 开始7天冷静期吧~` };
+  },
+
   // 每日确认（"我还想要"）
-  confirmWish(id: number): { confirmed: boolean; alreadyConfirmed: boolean; remainingDays: number } {
+  confirmWish(id: number): { confirmed: boolean; alreadyConfirmed: boolean; remainingDays: number; totalConfirmations: number } {
     const db = getDatabase();
     const wish = db.getFirstSync<Wish>("SELECT id, name, image_path as imagePath, price, created_at as createdAt, cooling_end_at as coolingEndAt, status, purchased_month as purchasedMonth, daily_confirmations as dailyConfirmations, child_notes as childNotes FROM wishes WHERE id = ?", [id]);
     if (!wish || wish.status !== "cooling") {
@@ -73,7 +110,7 @@ export const WishService = {
         0,
         Math.ceil((wish.coolingEndAt * 1000 - now()) / (1000 * 60 * 60 * 24))
       );
-      return { confirmed: true, alreadyConfirmed: true, remainingDays };
+      return { confirmed: true, alreadyConfirmed: true, remainingDays, totalConfirmations: confirmations.length };
     }
 
     confirmations.push(today);
@@ -87,15 +124,16 @@ export const WishService = {
       Math.ceil((wish.coolingEndAt * 1000 - now()) / (1000 * 60 * 60 * 24))
     );
     logger.info("Wish confirmed", { id, day: confirmations.length, remainingDays });
-    return { confirmed: true, alreadyConfirmed: false, remainingDays };
+    return { confirmed: true, alreadyConfirmed: false, remainingDays, totalConfirmations: confirmations.length };
   },
 
   // 取消愿望（"不想要了"）
   cancelWish(id: number): void {
     const db = getDatabase();
+    // 把 cooling_end_at 更新为当前时间，作为取消时间记录
     db.runSync(
-      "UPDATE wishes SET status = 'cancelled' WHERE id = ?",
-      [id]
+      "UPDATE wishes SET status = 'cancelled', cooling_end_at = ? WHERE id = ?",
+      [Math.floor(now() / 1000), id]
     );
     logger.info("Wish cancelled", { id });
   },
@@ -172,6 +210,43 @@ export const WishService = {
     }
 
     return results;
+  },
+
+  // 手动触发单个愿望的购买判断（只处理当前点击的愿望，不影响其他）
+  purchaseSingleWish(id: number): { status: string; message: string } {
+    const db = getDatabase();
+    const wish = db.getFirstSync<Wish>("SELECT id, name, image_path as imagePath, price, created_at as createdAt, cooling_end_at as coolingEndAt, status, purchased_month as purchasedMonth, daily_confirmations as dailyConfirmations, child_notes as childNotes FROM wishes WHERE id = ?", [id]);
+    if (!wish || wish.status !== "cooling") {
+      throw new Error("愿望不在冷静期");
+    }
+
+    // 检查预算
+    const _now = new Date(now());
+    const currentMonth = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}`;
+    const budget = db.getFirstSync<{ remaining: number }>(
+      "SELECT remaining FROM monthly_budgets WHERE month = ?",
+      [currentMonth]
+    );
+
+    if (budget && budget.remaining >= wish.price) {
+      // 预算充足，购买
+      const newRemaining = budget.remaining - wish.price;
+      db.runSync(
+        "UPDATE monthly_budgets SET spent = spent + ?, remaining = ? WHERE month = ?",
+        [wish.price, newRemaining, currentMonth]
+      );
+      db.runSync(
+        "UPDATE wishes SET status = 'purchased', purchased_month = ? WHERE id = ?",
+        [currentMonth, wish.id]
+      );
+      logger.info("Wish purchased (manual)", { id: wish.id, name: wish.name, price: wish.price });
+      return { status: "purchased", message: `太棒了！${wish.name} 已购买！` };
+    } else {
+      // 预算不足
+      db.runSync("UPDATE wishes SET status = 'insufficient' WHERE id = ?", [wish.id]);
+      logger.info("Wish insufficient budget (manual)", { id: wish.id, name: wish.name });
+      return { status: "insufficient", message: `${wish.name} 预算不够，下月再来吧~` };
+    }
   },
 
   // 获取愿望（by ID）
