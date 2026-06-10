@@ -3,7 +3,7 @@
  */
 
 import { create } from "zustand";
-import { AuthService, type LoginResult } from "@/services/authService";
+import { AuthService, setCurrentUserId, type LoginResult } from "@/services/authService";
 import { BudgetService } from "@/services/budgetService";
 import { logger } from "@/logger";
 
@@ -28,9 +28,11 @@ export const useAuthStore = create<AuthState>((set) => ({
   init: async () => {
     try {
       const user = await AuthService.getCurrentUser();
+      setCurrentUserId(user?.id ?? null);
       set({ user, isLoggedIn: !!user, isLoading: false });
       logger.info("Auth initialized", { loggedIn: !!user });
     } catch (e) {
+      setCurrentUserId(null);
       set({ isLoading: false });
     }
   },
@@ -54,6 +56,7 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   logout: async () => {
     await AuthService.logout();
+    setCurrentUserId(null);
     set({ user: null, isLoggedIn: false });
   },
 

@@ -4,6 +4,7 @@
 
 import { getDatabase, type MonthlyBudget } from "@/db/schema";
 import { getCurrentMonth } from "@/utils/security";
+import { getCurrentUserId } from "@/services/authService";
 import { logger } from "@/logger";
 
 export interface BudgetWithPurchases extends MonthlyBudget {
@@ -15,6 +16,12 @@ export interface BudgetWithPurchases extends MonthlyBudget {
   }>;
 }
 
+function assertLoggedIn(): number {
+  const userId = getCurrentUserId();
+  if (!userId) throw new Error("未登录");
+  return userId;
+}
+
 export const BudgetService = {
   // 获取当前月预算
   getCurrentBudget(): BudgetWithPurchases | null {
@@ -24,10 +31,11 @@ export const BudgetService = {
 
   // 获取指定月预算
   getBudgetByMonth(month: string): BudgetWithPurchases | null {
+    const userId = assertLoggedIn();
     const db = getDatabase();
     const budget = db.getFirstSync<MonthlyBudget>(
-      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ?",
-      [month]
+      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ? AND user_id = ?",
+      [month, userId]
     );
     if (!budget) return null;
 
@@ -38,8 +46,8 @@ export const BudgetService = {
       price: number;
       image_path: string | null;
     }>(
-      "SELECT id, name, price, image_path FROM wishes WHERE status = 'purchased' AND purchased_month = ?",
-      [month]
+      "SELECT id, name, price, image_path FROM wishes WHERE status = 'purchased' AND purchased_month = ? AND user_id = ?",
+      [month, userId]
     );
 
     return {
@@ -55,48 +63,52 @@ export const BudgetService = {
 
   // 获取历史预算
   getHistory(): MonthlyBudget[] {
+    const userId = assertLoggedIn();
     const db = getDatabase();
     return db.getAllSync<MonthlyBudget>(
-      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets ORDER BY month DESC"
+      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE user_id = ? ORDER BY month DESC",
+      [userId]
     );
   },
 
   // 生成本月预算（如果不存在则创建）
   generateMonthBudget(): MonthlyBudget {
+    const userId = assertLoggedIn();
     const db = getDatabase();
     const month = getCurrentMonth();
 
     // 检查是否已存在
     const existing = db.getFirstSync<MonthlyBudget>(
-      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ?",
-      [month]
+      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ? AND user_id = ?",
+      [month, userId]
     );
     if (existing) return existing;
 
     // 获取用户设定的基础预算
     const userRow = db.getFirstSync<{ monthly_budget: number }>(
-      "SELECT monthly_budget FROM users LIMIT 1"
+      "SELECT monthly_budget FROM users WHERE id = ?",
+      [userId]
     );
     const baseBudget = userRow?.monthly_budget ?? 30;
 
     // 计算上月滚存（含超支扣除）
     const lastMonth = this.getPrevMonth(month);
     const lastBudget = db.getFirstSync<MonthlyBudget>(
-      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ?",
-      [lastMonth]
+      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ? AND user_id = ?",
+      [lastMonth, userId]
     );
     const carriedOver = lastBudget ? lastBudget.remaining : 0;
     const totalBudget = Math.max(0, baseBudget + carriedOver);
 
     db.runSync(
-      `INSERT INTO monthly_budgets (month, base_budget, carried_over, total_budget, remaining)
-       VALUES (?, ?, ?, ?, ?)`,
-      [month, baseBudget, carriedOver, totalBudget, totalBudget]
+      `INSERT INTO monthly_budgets (user_id, month, base_budget, carried_over, total_budget, remaining)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [userId, month, baseBudget, carriedOver, totalBudget, totalBudget]
     );
 
     const budget = db.getFirstSync<MonthlyBudget>(
-      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ?",
-      [month]
+      "SELECT id, month, base_budget as baseBudget, carried_over as carriedOver, total_budget as totalBudget, spent, remaining FROM monthly_budgets WHERE month = ? AND user_id = ?",
+      [month, userId]
     );
     if (!budget) throw new Error("生成预算失败");
 

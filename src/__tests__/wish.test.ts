@@ -5,11 +5,18 @@
 
 import { WishService } from "@/services/wishService";
 import { BudgetService } from "@/services/budgetService";
+import { AuthService } from "@/services/authService";
+import { getCurrentUserId } from "@/services/authService";
 import { resetDatabase } from "@/db/schema";
 
 describe("WishService", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     resetDatabase();
+    await AuthService.register({
+      username: "testuser",
+      password: "testpass",
+      parentPassword: "parent123",
+    });
   });
 
   // ===== TC-10: 添加愿望 =====
@@ -84,12 +91,13 @@ describe("WishService", () => {
     // 创建一个冷却期已过期的愿望（通过直接操作数据库模拟）
     const db = require("@/db/schema").getDatabase();
     const now = Math.floor(Date.now() / 1000);
+    const userId = getCurrentUserId();
 
     // 插入一个7天前创建、冷静期已结束、且从未确认的愿望
     db.runSync(
-      `INSERT INTO wishes (name, price, created_at, cooling_end_at, status, daily_confirmations)
-       VALUES (?, ?, ?, ?, 'cooling', '[]')`,
-      ["过期愿望", 50, now - 8 * 86400, now - 86400]
+      `INSERT INTO wishes (user_id, name, price, created_at, cooling_end_at, status, daily_confirmations)
+       VALUES (?, ?, ?, ?, ?, 'cooling', '[]')`,
+      [userId, "过期愿望", 50, now - 8 * 86400, now - 86400]
     );
 
     const results = WishService.processCoolingWishes();
@@ -103,15 +111,16 @@ describe("WishService", () => {
   test("TC-17: 冷静期到期且第7天已确认应变为wanted", () => {
     const db = require("@/db/schema").getDatabase();
     const now = Math.floor(Date.now() / 1000);
+    const userId = getCurrentUserId();
 
     // 计算第7天（冷静期最后一天）的日期
     const coolingEndAt = now - 3600; // 1小时前结束
     const lastDay = new Date((coolingEndAt - 86400) * 1000).toISOString().split("T")[0];
 
     db.runSync(
-      `INSERT INTO wishes (name, price, created_at, cooling_end_at, status, daily_confirmations)
-       VALUES (?, ?, ?, ?, 'cooling', ?)`,
-      ["已确认愿望", 50, now - 8 * 86400, coolingEndAt, JSON.stringify([lastDay])]
+      `INSERT INTO wishes (user_id, name, price, created_at, cooling_end_at, status, daily_confirmations)
+       VALUES (?, ?, ?, ?, ?, 'cooling', ?)`,
+      [userId, "已确认愿望", 50, now - 8 * 86400, coolingEndAt, JSON.stringify([lastDay])]
     );
 
     const results = WishService.processCoolingWishes();
@@ -122,8 +131,13 @@ describe("WishService", () => {
 });
 
 describe("BudgetService", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     resetDatabase();
+    await AuthService.register({
+      username: "testuser",
+      password: "testpass",
+      parentPassword: "parent123",
+    });
   });
 
   // ===== TC-18: 生成本月预算 =====

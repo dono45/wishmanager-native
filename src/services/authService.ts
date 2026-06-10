@@ -10,6 +10,10 @@ import { logger } from "@/logger";
 const AUTH_TOKEN_KEY = "auth_token";
 const AUTH_USER_KEY = "auth_user";
 
+let _currentUserId: number | null = null;
+export function setCurrentUserId(id: number | null): void { _currentUserId = id; }
+export function getCurrentUserId(): number | null { return _currentUserId; }
+
 export interface RegisterInput {
   username: string;
   password: string;
@@ -57,6 +61,8 @@ export const AuthService = {
     );
 
     const userId = result.lastInsertRowId;
+    setCurrentUserId(Number(userId));
+
     const user: LoginResult["user"] = {
       id: Number(userId),
       username: input.username,
@@ -93,6 +99,7 @@ export const AuthService = {
     }
 
     const user = dbRowToUser(row);
+    setCurrentUserId(user.id);
     await SecureStore.setItemAsync(AUTH_USER_KEY, JSON.stringify(user));
     logger.info("User logged in", { userId: user.id });
     return { user };
@@ -119,11 +126,13 @@ export const AuthService = {
       const json = await SecureStore.getItemAsync(AUTH_USER_KEY);
       if (!json) return null;
       const parsed = JSON.parse(json);
-      return {
+      const user = {
         ...parsed,
         totalStars: parsed.totalStars ?? 0,
         avatar: parsed.avatar ?? null,
       };
+      setCurrentUserId(user.id);
+      return user;
     } catch {
       return null;
     }
@@ -132,6 +141,7 @@ export const AuthService = {
   // 退出登录
   async logout(): Promise<void> {
     await SecureStore.deleteItemAsync(AUTH_USER_KEY);
+    setCurrentUserId(null);
     logger.info("User logged out");
   },
 

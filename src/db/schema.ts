@@ -12,7 +12,7 @@ import { logger } from "@/logger";
 export const DB_NAME = "wishmanager.db";
 
 // 当前数据库版本号
-export const CURRENT_DB_VERSION = 2;
+export const CURRENT_DB_VERSION = 3;
 
 // ============ 建表 SQL ============
 
@@ -33,17 +33,20 @@ CREATE TABLE IF NOT EXISTS users (
 -- 月度预算表
 CREATE TABLE IF NOT EXISTS monthly_budgets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  month TEXT NOT NULL UNIQUE,
+  user_id INTEGER,
+  month TEXT NOT NULL,
   base_budget REAL NOT NULL DEFAULT 100,
   carried_over REAL NOT NULL DEFAULT 0,
   total_budget REAL NOT NULL,
   spent REAL NOT NULL DEFAULT 0,
-  remaining REAL NOT NULL
+  remaining REAL NOT NULL,
+  UNIQUE(user_id, month)
 );
 
 -- 愿望表
 CREATE TABLE IF NOT EXISTS wishes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
   name TEXT NOT NULL,
   image_path TEXT,
   price REAL NOT NULL,
@@ -58,6 +61,7 @@ CREATE TABLE IF NOT EXISTS wishes (
 -- 任务表
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
   title TEXT NOT NULL,
   type TEXT NOT NULL CHECK(type IN ('daily','weekly','special')),
   stars INTEGER NOT NULL DEFAULT 1,
@@ -69,18 +73,21 @@ CREATE TABLE IF NOT EXISTS tasks (
   week_start TEXT
 );
 
--- 成就表（保留但不再使用）
+-- 成就表
 CREATE TABLE IF NOT EXISTS achievements (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  achievement_id TEXT NOT NULL UNIQUE,
+  user_id INTEGER,
+  achievement_id TEXT NOT NULL,
   progress INTEGER NOT NULL DEFAULT 0,
   max_progress INTEGER NOT NULL,
-  unlocked_at INTEGER
+  unlocked_at INTEGER,
+  UNIQUE(user_id, achievement_id)
 );
 
 -- 冲突记录表
 CREATE TABLE IF NOT EXISTS crisis_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
   location TEXT,
   started_at INTEGER NOT NULL DEFAULT (unixepoch()),
   resolved_at INTEGER,
@@ -93,10 +100,16 @@ CREATE TABLE IF NOT EXISTS crisis_records (
 
 const CREATE_INDEXES_SQL = `
 CREATE INDEX IF NOT EXISTS idx_wishes_status ON wishes(status);
+CREATE INDEX IF NOT EXISTS idx_wishes_user_status ON wishes(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_wishes_cooling_end ON wishes(cooling_end_at);
+CREATE INDEX IF NOT EXISTS idx_wishes_user_cooling ON wishes(user_id, cooling_end_at);
 CREATE INDEX IF NOT EXISTS idx_monthly_budgets_month ON monthly_budgets(month);
+CREATE INDEX IF NOT EXISTS idx_monthly_budgets_user_month ON monthly_budgets(user_id, month);
 CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(type);
+CREATE INDEX IF NOT EXISTS idx_tasks_user_type ON tasks(user_id, type);
 CREATE INDEX IF NOT EXISTS idx_achievements_id ON achievements(achievement_id);
+CREATE INDEX IF NOT EXISTS idx_achievements_user_achievement ON achievements(user_id, achievement_id);
+CREATE INDEX IF NOT EXISTS idx_crisis_records_user ON crisis_records(user_id);
 `;
 
 // ============ 类型定义 ============
@@ -208,12 +221,6 @@ function migrate(database: SQLite.SQLiteDatabase, fromVersion: number) {
       database.execSync(CREATE_TABLES_SQL);
       database.execSync(CREATE_INDEXES_SQL);
 
-      // 初始化成就数据
-      seedAchievements(database);
-
-      // 初始化默认任务
-      seedDefaultTasks(database);
-
       database.execSync(`PRAGMA user_version = 1`);
       logger.info("Migration v0 -> v1 complete");
     }
@@ -251,15 +258,78 @@ function migrate(database: SQLite.SQLiteDatabase, fromVersion: number) {
 
       // 清理旧任务并重新初始化（去重）
       database.execSync(`DELETE FROM tasks;`);
-      seedDefaultTasks(database);
 
       database.execSync(`PRAGMA user_version = 2`);
       logger.info("Migration v1 -> v2 complete");
     }
+
+    // v2 -> v3: 添加 user_id 数据隔离
+    if (fromVersion < 3) {
+      logger.info("Migrating v2 -> v3: Adding user_id isolation");
+
+      const firstUserId = database.getFirstSync<{ id: number }>(
+        "SELECT id FROM users ORDER BY id LIMIT 1"
+      )?.id ?? null;
+
+      if (firstUserId !== null) {
+        // 为现有表添加 user_id 并归属给第一个用户
+        database.execSync(`ALTER TABLE wishes ADD COLUMN user_id INTEGER;`);
+        database.execSync(`UPDATE wishes SET user_id = ${firstUserId};`);
+
+        database.execSync(`ALTER TABLE tasks ADD COLUMN user_id INTEGER;`);
+        database.execSync(`UPDATE tasks SET user_id = ${firstUserId};`);
+
+        database.execSync(`ALTER TABLE crisis_records ADD COLUMN user_id INTEGER;`);
+        database.execSync(`UPDATE crisis_records SET user_id = ${firstUserId};`);
+
+        // 重建月度预算表（添加 user_id，修改 UNIQUE）
+        database.execSync(`
+          CREATE TABLE monthly_budgets_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            month TEXT NOT NULL,
+            base_budget REAL NOT NULL DEFAULT 100,
+            carried_over REAL NOT NULL DEFAULT 0,
+            total_budget REAL NOT NULL,
+            spent REAL NOT NULL DEFAULT 0,
+            remaining REAL NOT NULL,
+            UNIQUE(user_id, month)
+          );
+        `);
+        database.execSync(`
+          INSERT INTO monthly_budgets_new (id, user_id, month, base_budget, carried_over, total_budget, spent, remaining)
+          SELECT id, ${firstUserId}, month, base_budget, carried_over, total_budget, spent, remaining FROM monthly_budgets;
+        `);
+        database.execSync(`DROP TABLE monthly_budgets;`);
+        database.execSync(`ALTER TABLE monthly_budgets_new RENAME TO monthly_budgets;`);
+
+        // 重建成就表（添加 user_id，修改 UNIQUE）
+        database.execSync(`
+          CREATE TABLE achievements_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            achievement_id TEXT NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            max_progress INTEGER NOT NULL,
+            unlocked_at INTEGER,
+            UNIQUE(user_id, achievement_id)
+          );
+        `);
+        database.execSync(`
+          INSERT INTO achievements_new (id, user_id, achievement_id, progress, max_progress, unlocked_at)
+          SELECT id, ${firstUserId}, achievement_id, progress, max_progress, unlocked_at FROM achievements;
+        `);
+        database.execSync(`DROP TABLE achievements;`);
+        database.execSync(`ALTER TABLE achievements_new RENAME TO achievements;`);
+      }
+
+      database.execSync(`PRAGMA user_version = 3`);
+      logger.info("Migration v2 -> v3 complete");
+    }
   });
 }
 
-function seedAchievements(database: SQLite.SQLiteDatabase) {
+export function seedAchievements(database: SQLite.SQLiteDatabase, userId: number) {
   const achievements = [
     { id: "cooling_master", maxProgress: 3 },
     { id: "saving_expert", maxProgress: 1 },
@@ -270,14 +340,14 @@ function seedAchievements(database: SQLite.SQLiteDatabase) {
   ];
   for (const a of achievements) {
     database.runSync(
-      `INSERT OR IGNORE INTO achievements (achievement_id, max_progress) VALUES (?, ?)`,
-      [a.id, a.maxProgress]
+      `INSERT OR IGNORE INTO achievements (user_id, achievement_id, max_progress) VALUES (?, ?, ?)`,
+      [userId, a.id, a.maxProgress]
     );
   }
-  logger.info("Seeded achievements", { count: achievements.length });
+  logger.info("Seeded achievements", { count: achievements.length, userId });
 }
 
-function seedDefaultTasks(database: SQLite.SQLiteDatabase) {
+export function seedDefaultTasks(database: SQLite.SQLiteDatabase, userId: number) {
   const currentTime = Math.floor(now() / 1000);
   const today = new Date();
   const dayOfWeek = today.getDay();
@@ -296,11 +366,11 @@ function seedDefaultTasks(database: SQLite.SQLiteDatabase) {
 
   for (const t of tasks) {
     database.runSync(
-      `INSERT INTO tasks (title, type, stars, completed, requires_parent_confirm, week_start) VALUES (?, ?, ?, ?, ?, ?)`,
-      [t.title, t.type, t.stars, t.completed, t.requires_parent_confirm || 0, weekStartStr]
+      `INSERT INTO tasks (user_id, title, type, stars, completed, requires_parent_confirm, week_start) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [userId, t.title, t.type, t.stars, t.completed, t.requires_parent_confirm || 0, weekStartStr]
     );
   }
-  logger.info("Seeded default tasks", { count: tasks.length });
+  logger.info("Seeded default tasks", { count: tasks.length, userId });
 }
 
 // ============ 重置数据库（测试用） ============
@@ -320,8 +390,6 @@ export function resetDatabase() {
     database.execSync(`
       DELETE FROM sqlite_sequence WHERE name IN ('users','monthly_budgets','wishes','tasks','achievements','crisis_records');
     `);
-    seedAchievements(database);
-    seedDefaultTasks(database);
   });
   logger.info("Database reset complete");
 }
