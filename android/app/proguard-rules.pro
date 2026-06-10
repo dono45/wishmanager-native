@@ -11,4 +11,22 @@
 -keep class com.swmansion.reanimated.** { *; }
 -keep class com.facebook.react.turbomodule.** { *; }
 
+# Expo modules used in this project
+-keep class expo.modules.sqlite.** { *; }
+-keep class expo.modules.securestore.** { *; }
+-keep class expo.modules.filesystem.** { *; }
+-keep class expo.modules.imagepicker.** { *; }
+-keep class expo.modules.crypto.** { *; }
+-keep class expo.modules.statusbar.** { *; }
+-keep class expo.modules.core.** { *; }
+
+# React Navigation / Screens / SafeArea
+-keep class com.swmansion.gesturehandler.** { *; }
+-keep class com.th3rdwave.** { *; }
+-keep class com.facebook.react.views.** { *; }
+
+# Keep React Native modules loaded via reflection
+-keepclassmembers class * { @com.facebook.react.bridge.ReactMethod <methods>; }
+-keepclassmembers class * { @com.facebook.react.bridge.ReactContextBaseJavaClass <methods>; }
+
 # Add any project specific keep options here:
