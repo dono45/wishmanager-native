@@ -4,6 +4,7 @@
 
 import { create } from "zustand";
 import { AuthService, type LoginResult } from "@/services/authService";
+import { BudgetService } from "@/services/budgetService";
 import { logger } from "@/logger";
 
 interface AuthState {
@@ -42,6 +43,13 @@ export const useAuthStore = create<AuthState>((set) => ({
   register: async (username, password, parentPassword) => {
     const result = await AuthService.register({ username, password, parentPassword });
     set({ user: result.user, isLoggedIn: true });
+    // 首次注册成功后自动生成当月预算
+    try {
+      BudgetService.generateMonthBudget();
+      logger.info("Auto-generated month budget after registration");
+    } catch (e) {
+      logger.warn("Failed to auto-generate budget on registration", { error: String(e) });
+    }
   },
 
   logout: async () => {
