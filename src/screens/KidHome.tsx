@@ -912,7 +912,7 @@ function MyTab() {
         </Card.Content>
       </Card>
 
-      {true && <DevPanel />}
+      {__DEV__ && <DevPanel />}
 
       {/* Edit Name Dialog */}
       <Portal>
